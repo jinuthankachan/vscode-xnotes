@@ -36,12 +36,20 @@
     "simple-git": "^3.19.1"
   },
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "xnotesContainer",
+          "title": "XNotes",
+          "icon": "resources/xnotes-icon.svg"
+        }
+      ]
+    },
     "views": {
-      "explorer": [
+      "xnotesContainer": [
         {
           "id": "xnotesView",
-          "name": "XNotes",
-          "when": "xnotesEnabled"
+          "name": "XNotes"
         }
       ]
     },

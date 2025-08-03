@@ -1,0 +1,5 @@
+<!-- resources/xnotes-icon.svg -->
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="24" height="24" fill="#007ACC"/>
+  <text x="12" y="16" text-anchor="middle" fill="white" font-size="12" font-family="Arial" font-weight="bold">XN</text>
+</svg>
