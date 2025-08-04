@@ -42,6 +42,21 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
         private gitService: GitService
     ) {}
 
+    private getDefaultCommitMessage(action: string, fileName: string): string {
+        const now = new Date();
+        const months = ['January', 'February', 'March', 'April', 'May', 'June',
+                       'July', 'August', 'September', 'October', 'November', 'December'];
+        
+        const month = months[now.getUTCMonth()];
+        const day = now.getUTCDate().toString().padStart(2, '0');
+        const year = now.getUTCFullYear();
+        const hours = now.getUTCHours().toString().padStart(2, '0');
+        const minutes = now.getUTCMinutes().toString().padStart(2, '0');
+        
+        const timestamp = `${month} ${day}, ${year} ${hours}:${minutes} UTC`;
+        return `${action} ${fileName} @ ${timestamp}`;
+    }
+
     refresh(): void {
         this._onDidChangeTreeData.fire();
     }
@@ -129,10 +144,11 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
             await fs.writeFile(encryptedPath, encryptedContent);
             
             // Commit the new note creation
+            const defaultMessage = this.getDefaultCommitMessage('Created file', `${fileName}.md`);
             const commitMessage = await vscode.window.showInputBox({
                 prompt: 'Enter commit message for creating this note',
-                placeHolder: `Create new note: ${fileName}`,
-                value: `Create new note: ${fileName}`
+                placeHolder: defaultMessage,
+                value: defaultMessage
             });
 
             if (commitMessage && commitMessage.trim().length > 0) {
@@ -178,10 +194,11 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
             await fs.ensureDir(folderPath);
             
             // Commit the new folder creation
+            const defaultMessage = this.getDefaultCommitMessage('Created folder', folderName);
             const commitMessage = await vscode.window.showInputBox({
                 prompt: 'Enter commit message for creating this folder',
-                placeHolder: `Create new folder: ${folderName}`,
-                value: `Create new folder: ${folderName}`
+                placeHolder: defaultMessage,
+                value: defaultMessage
             });
 
             if (commitMessage && commitMessage.trim().length > 0) {
@@ -239,7 +256,7 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
             // Save on document save
             const onSaveDisposable = vscode.workspace.onDidSaveTextDocument(async (savedDoc) => {
                 if (savedDoc.uri.fsPath === tempFilePath) {
-                    await this.saveEncryptedNote(tempFilePath, item.filePath, config.encryptionPassword);
+                    await this.saveEncryptedNote(tempFilePath, item.filePath, config.encryptionPassword, item.label);
                     console.log('Note saved and encrypted:', item.filePath);
                 }
             });
@@ -284,17 +301,19 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
         }
     }
 
-    private async saveEncryptedNote(tempPath: string, encryptedPath: string, password: string): Promise<void> {
+    private async saveEncryptedNote(tempPath: string, encryptedPath: string, password: string, fileName: string): Promise<void> {
         try {
             const content = await fs.readFile(tempPath, 'utf8');
             const encrypted = this.encryptionService.encrypt(content, password);
             await fs.writeFile(encryptedPath, encrypted);
             console.log('Successfully encrypted and saved:', encryptedPath);
 
-            // Prompt user for commit message on save
+            // Prompt user for commit message on save with default
+            const defaultMessage = this.getDefaultCommitMessage('Updated file', fileName);
             const commitMessage = await vscode.window.showInputBox({
                 prompt: 'Enter commit message for this save',
-                placeHolder: 'Update note contents'
+                placeHolder: defaultMessage,
+                value: defaultMessage
             });
 
             if (commitMessage && commitMessage.trim().length > 0) {
@@ -348,10 +367,11 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
                 await fs.remove(item.filePath);
                 
                 // Commit the deletion
+                const defaultMessage = this.getDefaultCommitMessage('Deleted', item.label);
                 const commitMessage = await vscode.window.showInputBox({
                     prompt: 'Enter commit message for deleting this item',
-                    placeHolder: `Delete ${item.label}`,
-                    value: `Delete ${item.label}`
+                    placeHolder: defaultMessage,
+                    value: defaultMessage
                 });
 
                 if (commitMessage && commitMessage.trim().length > 0) {
@@ -384,10 +404,10 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
             vscode.window.showInformationMessage('Syncing notes to remote repository...');
             
             // Just push any pending commits, don't create a new one
-            const timestamp = new Date().toISOString();
+            const defaultMessage = this.getDefaultCommitMessage('Manual sync', 'repository');
             await this.gitService.commitAndPush(
                 config.notesDirectory,
-                `Manual sync: ${timestamp}`,
+                defaultMessage,
                 !!config.gitRemote
             );
             
