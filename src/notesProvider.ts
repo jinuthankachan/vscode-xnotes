@@ -127,6 +127,23 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
         try {
             const encryptedContent = this.encryptionService.encrypt(initContent, config.encryptionPassword);
             await fs.writeFile(encryptedPath, encryptedContent);
+            
+            // Commit the new note creation
+            const commitMessage = await vscode.window.showInputBox({
+                prompt: 'Enter commit message for creating this note',
+                placeHolder: `Create new note: ${fileName}`,
+                value: `Create new note: ${fileName}`
+            });
+
+            if (commitMessage && commitMessage.trim().length > 0) {
+                try {
+                    await this.gitService.commitAndPush(config.notesDirectory, commitMessage.trim(), !!config.gitRemote);
+                    vscode.window.showInformationMessage('New note created and committed: ' + commitMessage);
+                } catch (error) {
+                    vscode.window.showWarningMessage('Note created but git commit failed: ' + (error instanceof Error ? error.message : error));
+                }
+            }
+            
             this.refresh();
 
             const noteItem = new NoteItem(`${fileName}.md`, vscode.TreeItemCollapsibleState.None, encryptedPath, false);
@@ -159,6 +176,23 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
 
         try {
             await fs.ensureDir(folderPath);
+            
+            // Commit the new folder creation
+            const commitMessage = await vscode.window.showInputBox({
+                prompt: 'Enter commit message for creating this folder',
+                placeHolder: `Create new folder: ${folderName}`,
+                value: `Create new folder: ${folderName}`
+            });
+
+            if (commitMessage && commitMessage.trim().length > 0) {
+                try {
+                    await this.gitService.commitAndPush(config.notesDirectory, commitMessage.trim(), !!config.gitRemote);
+                    vscode.window.showInformationMessage('New folder created and committed: ' + commitMessage);
+                } catch (error) {
+                    vscode.window.showWarningMessage('Folder created but git commit failed: ' + (error instanceof Error ? error.message : error));
+                }
+            }
+            
             this.refresh();
         } catch (error) {
             vscode.window.showErrorMessage(`Failed to create folder: ${error instanceof Error ? error.message : error}`);
@@ -214,9 +248,14 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
             // Clean up when document is closed
             const onCloseDisposable = vscode.workspace.onDidCloseTextDocument(async (closedDoc) => {
                 if (closedDoc.uri.fsPath === tempFilePath) {
-                    // Final save before closing
-                    await this.saveEncryptedNote(tempFilePath, item.filePath, config.encryptionPassword);
-                    await this.commitChanges(config);
+                    // Final save before closing (without commit prompt to avoid annoyance)
+                    try {
+                        const content = await fs.readFile(tempFilePath, 'utf8');
+                        const encrypted = this.encryptionService.encrypt(content, config.encryptionPassword);
+                        await fs.writeFile(item.filePath, encrypted);
+                    } catch (error) {
+                        console.error('Failed to save on close:', error);
+                    }
 
                     // Clean up
                     try {
@@ -229,7 +268,7 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
                     this.openFiles.delete(item.filePath);
                     disposables.forEach(d => d.dispose());
 
-                    console.log('Note closed and committed:', item.filePath);
+                    console.log('Note closed:', item.filePath);
                 }
             });
             disposables.push(onCloseDisposable);
@@ -251,6 +290,24 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
             const encrypted = this.encryptionService.encrypt(content, password);
             await fs.writeFile(encryptedPath, encrypted);
             console.log('Successfully encrypted and saved:', encryptedPath);
+
+            // Prompt user for commit message on save
+            const commitMessage = await vscode.window.showInputBox({
+                prompt: 'Enter commit message for this save',
+                placeHolder: 'Update note contents'
+            });
+
+            if (commitMessage && commitMessage.trim().length > 0) {
+                const config = await this.configService.getConfig();
+                if (config) {
+                    try {
+                        await this.gitService.commitAndPush(config.notesDirectory, commitMessage.trim(), !!config.gitRemote);
+                        vscode.window.showInformationMessage('Changes committed: ' + commitMessage);
+                    } catch (error) {
+                        vscode.window.showErrorMessage('Git commit failed: ' + (error instanceof Error ? error.message : error));
+                    }
+                }
+            }
         } catch (error) {
             console.error('Failed to save encrypted note:', error);
             vscode.window.showErrorMessage('Failed to save note. Please try again.');
@@ -289,12 +346,27 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
                 }
 
                 await fs.remove(item.filePath);
-                this.refresh();
+                
+                // Commit the deletion
+                const commitMessage = await vscode.window.showInputBox({
+                    prompt: 'Enter commit message for deleting this item',
+                    placeHolder: `Delete ${item.label}`,
+                    value: `Delete ${item.label}`
+                });
 
-                const config = await this.configService.getConfig();
-                if (config) {
-                    await this.commitChanges(config);
+                if (commitMessage && commitMessage.trim().length > 0) {
+                    const config = await this.configService.getConfig();
+                    if (config) {
+                        try {
+                            await this.gitService.commitAndPush(config.notesDirectory, commitMessage.trim(), !!config.gitRemote);
+                            vscode.window.showInformationMessage('Item deleted and committed: ' + commitMessage);
+                        } catch (error) {
+                            vscode.window.showWarningMessage('Item deleted but git commit failed: ' + (error instanceof Error ? error.message : error));
+                        }
+                    }
                 }
+                
+                this.refresh();
             } catch (error) {
                 vscode.window.showErrorMessage(`Failed to delete item: ${error instanceof Error ? error.message : error}`);
             }
@@ -310,7 +382,15 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
 
         try {
             vscode.window.showInformationMessage('Syncing notes to remote repository...');
-            await this.commitChanges(config);
+            
+            // Just push any pending commits, don't create a new one
+            const timestamp = new Date().toISOString();
+            await this.gitService.commitAndPush(
+                config.notesDirectory,
+                `Manual sync: ${timestamp}`,
+                !!config.gitRemote
+            );
+            
             vscode.window.showInformationMessage('Successfully synced notes to remote repository.');
         } catch (error) {
             console.error('Sync failed:', error);
