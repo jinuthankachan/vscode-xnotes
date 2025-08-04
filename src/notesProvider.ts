@@ -29,6 +29,12 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<NoteItem | undefined | null | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
+    // Track open files to prevent multiple watchers
+    private openFiles = new Map<string, {
+        tempPath: string;
+        disposables: vscode.Disposable[];
+    }>();
+
     constructor(
         private context: vscode.ExtensionContext,
         private configService: ConfigService,
@@ -66,9 +72,13 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
                 }
             }
 
-            return noteItems;
+            return noteItems.sort((a, b) => {
+                if (a.isDirectory && !b.isDirectory) return -1;
+                if (!a.isDirectory && b.isDirectory) return 1;
+                return a.label.localeCompare(b.label);
+            });
         } catch (error) {
-            console.error(error);
+            console.error('Error reading directory:', error);
             return [];
         }
     }
@@ -76,15 +86,21 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
     async setup(): Promise<void> {
         const config = await this.configService.setupConfig();
         if (config) {
-            if (config.gitRemote) await this.gitService.initRepository(config.notesDirectory, config.gitRemote);
+            if (config.gitRemote) {
+                await this.gitService.initRepository(config.notesDirectory, config.gitRemote);
+            }
             vscode.commands.executeCommand('setContext', 'xnotesEnabled', true);
             this.refresh();
+            vscode.window.showInformationMessage('XNotes setup completed successfully!');
         }
     }
 
     async createNewNote(): Promise<void> {
         const config = await this.configService.getConfig();
-        if (!config) { vscode.window.showErrorMessage('Set up XNotes first.'); return; }
+        if (!config) {
+            vscode.window.showErrorMessage('Set up XNotes first.');
+            return;
+        }
 
         const fileName = await vscode.window.showInputBox({
             prompt: 'Enter new note name (without extension)',
@@ -99,6 +115,13 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
         if (!fileName) return;
 
         const encryptedPath = path.join(config.notesDirectory, `${fileName}.enc`);
+        
+        // Check if file already exists
+        if (await fs.pathExists(encryptedPath)) {
+            vscode.window.showErrorMessage('A note with this name already exists.');
+            return;
+        }
+
         const initContent = `# ${fileName}\n\nYour new note...`;
 
         try {
@@ -115,7 +138,10 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
 
     async createNewFolder(): Promise<void> {
         const config = await this.configService.getConfig();
-        if (!config) { vscode.window.showErrorMessage('Set up XNotes first.'); return; }
+        if (!config) {
+            vscode.window.showErrorMessage('Set up XNotes first.');
+            return;
+        }
 
         const folderName = await vscode.window.showInputBox({
             prompt: 'Enter new folder name',
@@ -143,7 +169,22 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
         const config = await this.configService.getConfig();
         if (!config || item.isDirectory) return;
 
+        // Check if file is already open
+        if (this.openFiles.has(item.filePath)) {
+            const existingFile = this.openFiles.get(item.filePath)!;
+            const document = await vscode.workspace.openTextDocument(existingFile.tempPath);
+            await vscode.window.showTextDocument(document);
+            return;
+        }
+
         try {
+            // Verify encrypted file exists
+            if (!(await fs.pathExists(item.filePath))) {
+                vscode.window.showErrorMessage('Note file not found.');
+                this.refresh();
+                return;
+            }
+
             const encryptedContent = await fs.readFile(item.filePath, 'utf8');
             const decryptedContent = this.encryptionService.decrypt(encryptedContent, config.encryptionPassword);
 
@@ -151,40 +192,68 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
             await fs.ensureDir(tempDir);
 
             const tempFileName = path.basename(item.filePath, '.enc') + '.md';
-            const tempFilePath = path.join(tempDir, tempFileName);
+            const tempFilePath = path.join(tempDir, tempFileName + '_' + Date.now()); // Unique temp file
 
             await fs.writeFile(tempFilePath, decryptedContent);
 
             const document = await vscode.workspace.openTextDocument(tempFilePath);
             await vscode.window.showTextDocument(document);
 
-            const watcher = vscode.workspace.createFileSystemWatcher(tempFilePath);
-            const onChangeDisposable = watcher.onDidChange(async () => {
-                await this.saveEncryptedNote(tempFilePath, item.filePath, config.encryptionPassword);
-            });
+            // Set up file watchers
+            const disposables: vscode.Disposable[] = [];
 
-            const onCloseDisposable = vscode.workspace.onDidCloseTextDocument(async closedDoc => {
-                if (closedDoc.uri.fsPath === tempFilePath) {
+            // Save on document save
+            const onSaveDisposable = vscode.workspace.onDidSaveTextDocument(async (savedDoc) => {
+                if (savedDoc.uri.fsPath === tempFilePath) {
                     await this.saveEncryptedNote(tempFilePath, item.filePath, config.encryptionPassword);
-                    await this.commitChanges(config);
-                    await fs.remove(tempFilePath);
-                    onChangeDisposable.dispose();
-                    onCloseDisposable.dispose();
-                    watcher.dispose();
+                    console.log('Note saved and encrypted:', item.filePath);
                 }
             });
+            disposables.push(onSaveDisposable);
+
+            // Clean up when document is closed
+            const onCloseDisposable = vscode.workspace.onDidCloseTextDocument(async (closedDoc) => {
+                if (closedDoc.uri.fsPath === tempFilePath) {
+                    // Final save before closing
+                    await this.saveEncryptedNote(tempFilePath, item.filePath, config.encryptionPassword);
+                    await this.commitChanges(config);
+
+                    // Clean up
+                    try {
+                        await fs.remove(tempFilePath);
+                    } catch (error) {
+                        console.error('Failed to remove temp file:', error);
+                    }
+
+                    // Remove from tracking and dispose watchers
+                    this.openFiles.delete(item.filePath);
+                    disposables.forEach(d => d.dispose());
+
+                    console.log('Note closed and committed:', item.filePath);
+                }
+            });
+            disposables.push(onCloseDisposable);
+
+            // Track the open file
+            this.openFiles.set(item.filePath, {
+                tempPath: tempFilePath,
+                disposables
+            });
+
         } catch (error) {
             vscode.window.showErrorMessage(`Failed to open note: ${error instanceof Error ? error.message : error}`);
         }
     }
 
-    private async saveEncryptedNote(tempPath: string, encryptedPath: string, password: string) {
+    private async saveEncryptedNote(tempPath: string, encryptedPath: string, password: string): Promise<void> {
         try {
             const content = await fs.readFile(tempPath, 'utf8');
             const encrypted = this.encryptionService.encrypt(content, password);
             await fs.writeFile(encryptedPath, encrypted);
+            console.log('Successfully encrypted and saved:', encryptedPath);
         } catch (error) {
             console.error('Failed to save encrypted note:', error);
+            vscode.window.showErrorMessage('Failed to save note. Please try again.');
         }
     }
 
@@ -196,6 +265,7 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
                 `Auto-commit: ${timestamp}`,
                 !!config.gitRemote
             );
+            console.log('Changes committed successfully');
         } catch (error) {
             console.error('Git operations failed:', error);
         }
@@ -210,11 +280,21 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
 
         if (choice === 'Yes') {
             try {
+                // Close file if it's open
+                if (this.openFiles.has(item.filePath)) {
+                    const openFile = this.openFiles.get(item.filePath)!;
+                    openFile.disposables.forEach(d => d.dispose());
+                    await fs.remove(openFile.tempPath);
+                    this.openFiles.delete(item.filePath);
+                }
+
                 await fs.remove(item.filePath);
                 this.refresh();
 
                 const config = await this.configService.getConfig();
-                if (config) await this.commitChanges(config);
+                if (config) {
+                    await this.commitChanges(config);
+                }
             } catch (error) {
                 vscode.window.showErrorMessage(`Failed to delete item: ${error instanceof Error ? error.message : error}`);
             }
@@ -229,9 +309,11 @@ export class NotesProvider implements vscode.TreeDataProvider<NoteItem> {
         }
 
         try {
+            vscode.window.showInformationMessage('Syncing notes to remote repository...');
             await this.commitChanges(config);
-            vscode.window.showInformationMessage('Synced notes to remote repository.');
+            vscode.window.showInformationMessage('Successfully synced notes to remote repository.');
         } catch (error) {
+            console.error('Sync failed:', error);
             vscode.window.showErrorMessage(`Sync failed: ${error instanceof Error ? error.message : error}`);
         }
     }
